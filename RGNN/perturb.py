@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 
 
-class LabelPerturbation:
+class GRR:
     def __init__(self, y_eps=np.inf):
         self.y_eps = y_eps
 
@@ -24,7 +24,6 @@ class LabelPerturbation:
 
             data.y[perturb_mask] = y_perturbed.float()
 
-            # set distortion matrix
             data.P_Y = torch.ones(data.num_classes, data.num_classes, device=data.y.device) * q
             data.P_Y.fill_diagonal_(p)
 
@@ -35,41 +34,57 @@ class LabelPerturbation:
         return data
 
 
-class FeaturePerturbation:
+class GRRFS:
     def __init__(self, x_eps=np.inf, m=None):
-        self.x_eps = x_eps
+        self.eps = x_eps
         self.m = m
+
+    @staticmethod
+    def __one_feature(grr_index, x_tuple, p, q, gamma_i):
+        x_mat = F.one_hot(x_tuple.to(torch.int64), num_classes=gamma_i)
+        p_grr = x_mat * p + (1 - x_mat) * q
+        pr_unif = 1/gamma_i
+        p_unif = torch.full(x_mat.shape, fill_value=pr_unif)
+
+        grr_response = torch.multinomial(p_grr, num_samples=1).squeeze().to(torch.float)
+        unif_response = torch.multinomial(p_unif, num_samples=1).squeeze().to(torch.float)
+
+        x_tuple[grr_index] = grr_response[grr_index]
+        x_tuple[~grr_index] = unif_response[~grr_index]
+
+        del x_mat, p_grr, p_unif
+
+        return x_tuple
 
     def __call__(self, data):
         x = data.x
         n, d = x.shape
+        gamma = torch.max(x, dim=1)[0] + 1
 
-        if not np.isinf(self.x_eps):
-            if self.m is None:
-                q = 1 / (math.exp(self.x_eps) + 1)
-                p = math.exp(self.x_eps) * q
-                pr_x = x * p + (1 - x) * q
-                data.x = torch.bernoulli(pr_x)
-                P = torch.full((d,), fill_value=p)
-                data.P_X = P
+        data.gamma = gamma
+        data.P_X = torch.empty((d, 2))
 
+        self.m = d if self.m is None else self.m
+
+        index = torch.rand_like(x).topk(self.m, dim=1).indices
+        bool_grr_index = torch.full(x.shape, fill_value=0).to(torch.bool)
+        bool_grr_index = bool_grr_index.scatter(1, index, True)
+
+        for i in range(d):
+            if not np.isinf(self.eps):
+                p = math.exp(self.eps) / (math.exp(self.eps) + gamma[i] - 1)
             else:
-                q1 = 1 / (math.exp(self.x_eps) + 1)
-                p1 = math.exp(self.x_eps) * q1
+                p = 1
 
-                p1_x = x * p1 + (1 - x) * q1
-                p2_x = torch.full(x.shape, fill_value=0.5)
+            q = (1 - p) / (gamma[i] - 1)
 
-                index = torch.rand_like(x).topk(self.m, dim=1).indices
-                pr_x = p2_x.scatter(1, index, p1_x)
-                del index, p1_x, p2_x
+            data.P_X[i][0] = p
+            data.P_X[i][1] = q
 
-                data.x = torch.bernoulli(pr_x)
-                P = torch.full((d,), fill_value=p1)
-                data.P_X = P
+            rnd_x_tuple = self.__one_feature(bool_grr_index[:, i], x[:, i], p, q, int(gamma[i]))
+            data.x[:, i] = rnd_x_tuple.to(torch.float)
 
-        else:
-            data.P_X = torch.full((d,), fill_value=1.0)
+        del bool_grr_index
 
         return data
 

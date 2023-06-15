@@ -81,58 +81,7 @@ class GAT(GNN):
         self.convs.append(GATConv(heads * hidden_channels, out_channels, heads=1, concat=False))
 
 
-class FeatureReconstructor(MessagePassing):
-    def __init__(self, _args, self_loops=True):
-        super().__init__(aggr='mean')
-
-        self.num_layers = _args.xhops
-        self.m = _args.m
-        self.self_loops = self_loops
-
-    def forward(self, data):
-        if self.num_layers <= 0:
-            return data
-
-        x = data.x
-        n, d = x.shape
-        edge_index = data.edge_index
-
-        if self.self_loops:
-            if isinstance(data.edge_index, SparseTensor):
-                edge_index = fill_diag(edge_index, 1.)
-            else:
-                edge_index, _ = remove_self_loops(edge_index)
-                edge_index, _ = add_self_loops(edge_index, num_nodes=n)
-        else:
-            edge_index = data.edge_index
-
-        # Propagate in k-hop neighborhood to get proportions
-        for _ in range(self.num_layers):
-            x = self.propagate(edge_index, x=x)
-
-        # Obtain unbiased estimates
-        if self.m is None:
-            P = data.P_X.repeat(n, 1).to(x.device)
-            pi_x = x.add(torch.sub(P, 1))
-            pi_x.true_divide_(torch.sub(P.mul(2), 1))
-            data.x = pi_x
-
-        elif self.m > 0:
-            P = data.P_X.repeat(n, 1).to(x.device)
-            pi_x = x.sub(0.5)
-            pi_x.true_divide_(torch.sub(P.mul(2), 1))
-            pi_x = pi_x.mul(d/self.m)
-            pi_x = pi_x.add(0.5)
-            data.x = pi_x
-
-        return data
-
-    def message_and_aggregate(self, adj_t, x):  # noqa
-        adj_t = adj_t.set_value(None, layout=None)
-        return matmul(adj_t, x[0], reduce=self.aggr)
-
-
-class LabelReconstructor(MessagePassing):
+class GRR_Reconstructor(MessagePassing):
     def __init__(self, _args, self_loops=True):
         super().__init__(aggr='mean')
         self.num_layers = _args.yhops
@@ -185,6 +134,70 @@ class LabelReconstructor(MessagePassing):
 
     def message_and_aggregate(self, adj_t, x): # noqa
         return matmul(adj_t, x, reduce=self.aggr)
+
+
+class GRRFS_Reconstructor(MessagePassing):
+    def __init__(self, _args, self_loops=True):
+        super().__init__(aggr='mean')
+
+        self.num_layers = _args.xhops
+        self.m = _args.m
+        self.self_loops = self_loops
+        self.d = None
+
+    def __get_pi(self, x_tuple, edge_index, p, q, gamma):
+        lambda_x = F.one_hot(x_tuple.to(torch.int64), num_classes=gamma).to(torch.float)
+
+        for _ in range(self.num_layers):
+            lambda_x = self.propagate(edge_index, x=lambda_x)
+
+        var1 = self.m * (p-q)
+        var2 = self.m - self.d - (self.m * gamma * q)
+
+        pi_x = lambda_x.mul(self.d/var1)
+        pi_x = pi_x.add(var2/(var1*gamma))
+
+        if int(gamma) == 2:
+            pi_x = pi_x[:, 1]
+        else:
+            pi_x = pi_x.argmax(dim=1)
+
+        return pi_x
+
+    def forward(self, data):
+        if self.num_layers <= 0:
+            return data
+
+        x = data.x
+        n, self.d = x.shape
+        edge_index = data.edge_index
+
+        self.m = self.d if self.m is None else self.m
+
+        if self.self_loops:
+            if isinstance(data.edge_index, SparseTensor):
+                edge_index = fill_diag(edge_index, 1.)
+            else:
+                edge_index, _ = remove_self_loops(edge_index)
+                edge_index, _ = add_self_loops(edge_index, num_nodes=n)
+        else:
+            edge_index = data.edge_index
+
+        # Feature-wise reconstruction
+        for i in range(self.d):
+            p = data.P_X[i][0]
+            q = data.P_X[i][1]
+            pi_x = self.__get_pi(x[:, i], edge_index, p, q, int(data.gamma[i]))
+            data.x[:, i] = pi_x
+
+        return data
+
+    def message_and_aggregate(self, adj_t, x):  # noqa
+        adj_t = adj_t.set_value(None, layout=None)
+        return matmul(adj_t, x[0], reduce=self.aggr)
+
+
+
 
 
 

@@ -1,41 +1,37 @@
+import copy
 import sys
 import numpy as np
+import os
+import datetime
+from termcolor import cprint
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import SGD, Adam
 
-from model import LabelReconstructor, FeatureReconstructor
+from model import GRR_Reconstructor, GRRFS_Reconstructor
 from utils import get_clusters, get_accuracy
 
 
 class Trainer:
     def __init__(self, _args, gnn, optimizer='adam'):
-        self.max_epochs = _args.epochs
-        self.device = _args.device
-        self.lr = _args.lr
-        self.weight_decay = _args.weight_decay
         self.gnn = gnn
         self.optimizer_name = optimizer
-
-        self.alpha = _args.alpha
-        self.num_clusters = _args.num_clusters
+        self._args = _args
 
         self._cached_cp = None
-
 
     def configure_optimizers(self):
         params = self.gnn.parameters()
 
         if self.optimizer_name == 'sgd':
-            return SGD(params, lr=self.lr, weight_decay=self.weight_decay)
+            return SGD(params, lr=self._args.lr, weight_decay=self._args.weight_decay)
         elif self.optimizer_name == 'adam':
-            return Adam(params, lr=self.lr, weight_decay=self.weight_decay)
+            return Adam(params, lr=self._args.lr, weight_decay=self._args.weight_decay)
         else:
             print("optimizer not configured")
             sys.exit(1)
-
 
     def train_one_epoch(self, data, optimizer, criterion):
         self.gnn.train()
@@ -63,16 +59,12 @@ class Trainer:
 
         return loss.item(), acc
 
-
-    # Loss for LLP
     def LLP_loss(self, data, outputs, loss):
-        if self.num_clusters is None or self.alpha == 0:
+        if self._args.num_clusters is None or self._args.num_clusters < 1 or self._args.alpha == 0:
             return loss
 
         if self._cached_cp is None:
-            # Obtain clusters
-            assert self.num_clusters > 0
-            data = get_clusters(data, num_clusters=self.num_clusters)
+            data = get_clusters(data, num_clusters=self._args.num_clusters)
 
             for i in range(data.num_clusters):
                 cluster_y = data.y[data.cluster_mask[i] & data.train_mask]
@@ -87,7 +79,6 @@ class Trainer:
             self._cached_cp[self._cached_cp < 0] = 1e-5
             self._cached_cp.true_divide_(torch.sum(self._cached_cp, dim=1, keepdim=True))
             self._cached_cp = self._cached_cp + 1e-20
-            # self._cached_cp = torch.nn.functional.one_hot(self._cached_cp.argmax(dim=1), num_classes=data.num_classes).float()
 
         # Compute cluster-based loss
         p_y = torch.sigmoid(outputs) if data.num_classes == 2 else outputs
@@ -107,10 +98,24 @@ class Trainer:
 
         llp_loss = F.kl_div(input=c_p_y_x, target=self._cached_cp, log_target=False, reduction='batchmean')
 
-        loss += self.alpha * llp_loss
+        loss += self._args.alpha * llp_loss
 
         return loss
 
+    def save_model_and_results(self, model):
+        try:
+            model_path = os.path.join(os.getcwd(), 'models')
+            os.makedirs(model_path, exist_ok=True)
+
+            date = '{}'.format(datetime.datetime.now().strftime('%Y-%m-%d-%H-%M'))
+            filename = "{}_{}_{}.txt".format(self._args.dataset, self._args.seed, date)
+
+            save_dict = {'state_dict': model}
+
+            torch.save(save_dict, f=os.path.join(model_path, filename))
+
+        except Exception as e:
+            cprint(f'Unable to save model: {e}', "red")
 
     def test_model(self, data, criterion, val_mode=False, ret_pred=False):
         self.gnn.eval()
@@ -135,9 +140,9 @@ class Trainer:
         else:
             return loss.item(), acc, None
 
-    def fit(self, data, _args, verbose=True):
-        data = data.to(self.device)
-        self.gnn = self.gnn.to(self.device)
+    def fit(self, data, verbose=True, save_model=True):
+        data = data.to(self._args.device)
+        self.gnn = self.gnn.to(self._args.device)
 
         optimizer = self.configure_optimizers()
 
@@ -151,21 +156,22 @@ class Trainer:
         test_at_best_val = 0.
         res = {}
         y = None
+        best_model = None
 
-        if not np.isinf(_args.y_eps):
-            fy = LabelReconstructor(_args)
+        if not np.isinf(self._args.y_eps):
+            fy = GRR_Reconstructor(self._args)
             data = fy(data)
 
-        if not np.isinf(_args.x_eps):
-            fx = FeatureReconstructor(_args)
+        if not np.isinf(self._args.x_eps):
+            fx = GRRFS_Reconstructor(self._args)
             data = fx(data)
 
-        for epoch in range(1, self.max_epochs + 1):
+        for epoch in range(1, self._args.epochs + 1):
             train_loss, train_acc = self.train_one_epoch(data, optimizer, criterion)
 
-            val_loss, val_acc, _ = self.test_model(data, criterion, val_mode=True)
+            val_loss, val_acc, _ = self.test_model(data, criterion, val_mode=True, ret_pred=False)
 
-            test_loss, test_acc, _ = self.test_model(data, criterion, val_mode=False, ret_pred=False)
+            test_loss, test_acc, y = self.test_model(data, criterion, val_mode=False, ret_pred=True)
 
             if test_acc > best_test_acc:
                 best_test_acc = test_acc
@@ -174,6 +180,7 @@ class Trainer:
                 best_val_acc = val_acc
                 test_at_best_val = test_acc
                 y_at_best_val = y
+                best_model = copy.deepcopy(self.gnn.state_dict())
 
                 res = {
                     "best_val_acc": best_val_acc,
@@ -181,13 +188,15 @@ class Trainer:
                     "best_test_perf": best_test_acc,
                 }
 
-                # save model here
-
             if verbose:
                 print("Epoch [{}/{}], Train Loss: {:.2f}, Train Acc: {:.2f}, Val Loss: {:.2f}, Val Acc: {:.2f}, Test Acc: {:.2f}".
-                      format(epoch, self.max_epochs, train_loss, train_acc, val_loss, val_acc, test_acc))
+                      format(epoch, self._args.epochs, train_loss, train_acc, val_loss, val_acc, test_acc))
+
+        # save best model
+        if save_model:
+            self.save_model_and_results(best_model)
 
         # display best metrics
-        print("\nBest metrics: Val Acc: {:.2f}, Test Acc: {:.2f}\n".format(best_val_acc, test_at_best_val))
+        cprint("\nBest metrics: Val Acc: {:.2f}, Test Acc: {:.2f}\n".format(best_val_acc, test_at_best_val), "blue")
 
         return res
