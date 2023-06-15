@@ -66,10 +66,11 @@ def get_arguments():
                         help='Hops for fx')
     parser.add_argument('--yhops', type=int, default=16,
                         help='Hops for fy')
-    parser.add_argument('--alpha', type=float, default=1,
-                        help='LLP regularization hyperparameter')
     parser.add_argument('--num_clusters', type=int, default=16,
                         help='No. of bags for LLP')
+    parser.add_argument('--alpha', type=float, default=1,
+                        help='LLP regularization hyperparameter')
+
 
     parser.add_argument('--gpu_id', type=int, default=1)
 
