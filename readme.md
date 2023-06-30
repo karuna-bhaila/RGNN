@@ -5,9 +5,13 @@ Repository for Local Differential Privacy in Graph Neural Networks: a Reconstruc
 ## Run
 The main code to train/test is in `main.py`.
 The default experiment setting is 5 runs with different random seeds.
-For the semi-synthetic datasets, the pickle files are available in the `datasets` folder. 
-Code for pre-processing these datasets are in `data.py`. 
+For semi-synthetic datasets, the pickle files are available in the `datasets` folder. 
+The code for pre-processing these datasets is in `data.py`. 
 All other datasets are automatically downloaded.
+
+### Commands
+Use the following command to train/test the model
+`python main.py --seed=123 --dataset=citeseer --cols_to_group=70 --model=sage --x_eps=1 --m=10 --y_eps=1 --xhops=16 --yhops=16 --num_clusters=16 --alpha=0.1`
 
 ### Dataset and Model
 | Argument      | Description             |
@@ -30,4 +34,4 @@ All other datasets are automatically downloaded.
 | x_hops		| No. of hops for feature propagation during reconstruction |
 | y_hops		| No. of hops for label propagation during reconstruction |
 | num_clusters	| No. of clusters for graph partitioning for LLP loss |
-| alpha			| Hyperparameter to control influence of LLP loss |
+| alpha			| Hyperparameter to control the influence of LLP loss |
