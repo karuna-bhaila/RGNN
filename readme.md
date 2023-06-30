@@ -10,7 +10,7 @@ The code for pre-processing these datasets is in `data.py`.
 All other datasets are automatically downloaded.
 
 ### Commands
-Use the following command to train/test the model
+Use the following command to train/test the model \
 `python main.py --seed=123 --dataset=citeseer --cols_to_group=70 --model=sage --x_eps=1 --m=10 --y_eps=1 --xhops=16 --yhops=16 --num_clusters=16 --alpha=0.1`
 
 ### Dataset and Model
